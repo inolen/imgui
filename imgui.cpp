@@ -2768,11 +2768,24 @@ static void ImGui::NavUpdate()
         g.NavWindow->NavRectRel[g.NavLayer] = g.NavInitResultRectRel;
         if (g.NavDisableMouseHover)
             g.NavMousePosDirty = true;
+        g.NavIdIsAlive = true;
     }
     g.NavInitRequest = false;
     g.NavInitResultExplicit = false;
     g.NavInitResultId = 0;
     g.NavJustMovedToId = 0;
+
+    // Keep something focused
+    if (g.NavWindow && !g.NavIdIsAlive)
+    {
+        SetNavID(0, g.NavLayer);
+        g.NavInitRequest = true;
+        g.NavInitResultId = 0;
+        g.NavInitResultExplicit = false;
+        g.NavInitResultRectRel = ImRect();
+        g.NavDisableHighlight = false;
+        NavUpdateAnyRequestFlag();
+    }
 
     // Process navigation move request
     if (g.NavMoveRequest && g.NavMoveResultId != 0)
