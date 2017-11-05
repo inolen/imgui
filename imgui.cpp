@@ -806,6 +806,7 @@ ImGuiIO::ImGuiIO()
     KeyRepeatDelay = 0.250f;
     KeyRepeatRate = 0.050f;
     NavMovesMouse = false;
+    NavScoreScaleX = 0.1f;
     UserData = NULL;
 
     Fonts = &GImDefaultFontAtlas;
@@ -2068,15 +2069,31 @@ void ImGui::ItemSize(const ImRect& bb, float text_offset_y)
 
 static ImGuiDir NavScoreItemGetQuadrant(float dx, float dy)
 {
-    if (fabsf(dx) > fabsf(dy))
+    // Favor the axis which most separates the items
+    float fx = fabsf(dx);
+    float fy = fabsf(dy);
+    if (fx > fy)
         return (dx > 0.0f) ? ImGuiDir_Right : ImGuiDir_Left;
-    return (dy > 0.0f) ? ImGuiDir_Down : ImGuiDir_Up;
+    else if (fy > fx)
+        return (dy > 0.0f) ? ImGuiDir_Down : ImGuiDir_Up;
+    return ImGuiDir_None;
 }
 
-static float NavScoreItemDistInterval(float a0, float a1, float b0, float b1)
+static float NavScoreItemCenterDist(float a0, float a1, float b0, float b1)
 {
+    // Return the distance between the center of the two overlapping ranges
+    if ((a0 < b0 && a1 < b1) || (b0 < a0 && b1 < a1))
+      return ((a0 + a1) - (b0 + b1)) / 2.0f;
+    // Return zero if one range contains the other (force a tie)
+    return 0.0f;
+}
+
+static float NavScoreItemAxialDist(float a0, float a1, float b0, float b1)
+{
+    // Return the distance between the two non-overlapping ranges
     if (a1 < b0) return a1 - b0;
     if (b1 < a0) return a0 - b1;
+    // Return zero if ranges overlap (force a tie)
     return 0.0f;
 }
 
@@ -2088,7 +2105,7 @@ static bool NavScoreItem(ImRect cand)
     if (g.NavLayer != window->DC.NavLayerCurrent)
         return false;
 
-    const ImRect& curr = g.NavScoringRectScreen; // Current modified source rect (NB: we've applied Max.x = Min.x in NavUpdate() to inhibit the effect of having varied item width)
+    const ImRect& curr = g.NavScoringRectScreen; // Current modified source rect
 
     // We perform scoring on items bounding box clipped by their parent window on the other axis (clipping on our movement axis would give us equal scores for all clipped items)
     if (g.NavMoveDir == ImGuiDir_Left || g.NavMoveDir == ImGuiDir_Right)
@@ -2102,50 +2119,42 @@ static bool NavScoreItem(ImRect cand)
         cand.Max.x = ImClamp(cand.Max.x, window->ClipRect.Min.x, window->ClipRect.Max.x);
     }
 
-    // Compute distance between boxes
-    // FIXME-NAVIGATION: Introducing biases for vertical navigation, needs to be removed.
-    float dbx = NavScoreItemDistInterval(cand.Min.x, cand.Max.x, curr.Min.x, curr.Max.x);
-    float dby = NavScoreItemDistInterval(ImLerp(cand.Min.y, cand.Max.y, 0.2f), ImLerp(cand.Min.y, cand.Max.y, 0.8f), ImLerp(curr.Min.y, curr.Max.y, 0.2f), ImLerp(curr.Min.y, curr.Max.y, 0.8f)); // Scale down on Y to keep using box-distance for vertically touching items
-    if (dby && dbx)
-       dbx = (dbx/1000.0f) + ((dbx > 0.0f) ? +1.0f : -1.0f);
-    float dist_box = fabsf(dbx) + fabsf(dby);
+    // Bias the contribution of each axis to favor horizontal movements
+    // TODO perhaps this scale could be dynamic based on the currently
+    // selected items size
+    float sx = g.IO.NavScoreScaleX;
+    float sy = 1.0f;
 
-    // Compute distance between centers (this is off by a factor of 2, but we only compare center distances with each other so it doesn't matter)
-    float dcx = (cand.Min.x + cand.Max.x) - (curr.Min.x + curr.Max.x);
-    float dcy = (cand.Min.y + cand.Max.y) - (curr.Min.y + curr.Max.y);
-    float dist_center = fabsf(dcx) + fabsf(dcy); // L1 metric (need this for our connectedness guarantee)
+    // Calculate the distance between the two items on both axes
+    float dax = NavScoreItemAxialDist(cand.Min.x, cand.Max.x, curr.Min.x, curr.Max.x) * sx;
+    float day = NavScoreItemAxialDist(cand.Min.y, cand.Max.y, curr.Min.y, curr.Max.y) * sy;
+    float da = fabsf(dax) + fabsf(day);
 
-    // Determine which quadrant of 'curr' our candidate item 'cand' lies in based on distance
-    ImGuiDir quadrant;
-    float dax = 0.0f, day = 0.0f, dist_axial = 0.0f;
-    if (dbx || dby) 
-    { 
-        // For non-overlapping boxes, use distance between boxes
-        dax = dbx;
-        day = dby;
-        dist_axial = dist_box;
-        quadrant = NavScoreItemGetQuadrant(dbx, dby);
-    } 
-    else if (dcx || dcy) 
-    { 
-        // For overlapping boxes with different centers, use distance between centers
-        dax = dcx;
-        day = dcy;
-        dist_axial = dist_center;
-        quadrant = NavScoreItemGetQuadrant(dcx, dcy);
-    } 
-    else
-    {
-        // Degenerate case: two overlapping buttons with same center, break ties arbitrarily (note that LastItemId here is really the _previous_ item order, but it doesn't matter)
-        quadrant = (window->DC.LastItemId < g.NavId) ? ImGuiDir_Left : ImGuiDir_Right;
-    }
+    float dcx = NavScoreItemCenterDist(cand.Min.x, cand.Max.x, curr.Min.x, curr.Max.x) * sx;
+    float dcy = NavScoreItemCenterDist(cand.Min.y, cand.Max.y, curr.Min.y, curr.Max.y) * sy;
+    float dc = fabsf(dcx) + fabsf(dcy);
+
+    // Determine which quadrant of curr the candidate lies is in based on the
+    // axial distance
+    ImGuiDir quadrant = NavScoreItemGetQuadrant(dax, day);
+
+    // If no quadrant could be determined, the items are overlapping, use the
+    // center distance to attempt to resolve
+    if (quadrant == ImGuiDir_None)
+      quadrant = NavScoreItemGetQuadrant(dcx, dcy);
+
+    // If still no quadrant could be detemined, these items must be centered on
+    // top of eachother, say the item is valid to move to
+    if (quadrant == ImGuiDir_None)
+      quadrant = g.NavMoveDir;
 
 #if IMGUI_DEBUG_NAV
     if (ImGui::IsMouseHoveringRect(cand.Min, cand.Max))
     {
         char buf[128];
         ImGui::PushFont(NULL);
-        ImFormatString(buf, IM_ARRAYSIZE(buf), "dbox (%.2f,%.2f->%.4f) dcen (%.2f,%.2f->%.4f) d (%.2f,%.2f->%.4f) nav %c, quad %c", dbx, dby, dist_box, dcx, dcy, dist_center, dax, day, dist_axial, "WENS"[g.NavMoveDir], "WENS"[quadrant]);
+        ImFormatString(buf, IM_ARRAYSIZE(buf), "min(%.2f,%.2f)\nmax(%.2f,%.2f)\nda (%.2f,%.2f->%.4f)\ndc (%.2f,%.2f,->%.4f)\nnav %c, quad %c",
+          cand.Min.x, cand.Min.y, cand.Max.x, cand.Max.y, dax, day, da, dcx, dcy, dc, " WENS"[g.NavMoveDir + 1], " WENS"[quadrant + 1]);
         g.OverlayDrawList.AddRect(cand.Min, cand.Max, IM_COL32(255,255,0,200));
         g.OverlayDrawList.AddRectFilled(cand.Max-ImVec2(4,4), cand.Max+ImGui::CalcTextSize(buf)+ImVec2(4,4), IM_COL32(40,0,0,150));
         g.OverlayDrawList.AddText(cand.Max, ~0U, buf);
@@ -2155,43 +2164,29 @@ static bool NavScoreItem(ImRect cand)
 
     // Is it in the quadrant we're interesting in moving to?
     bool new_best = false;
+
     if (quadrant == g.NavMoveDir) 
     {
         // Does it beat the current best candidate?
-        if (dist_box < g.NavMoveResultDistBox) 
+        if (da < g.NavMoveResultDistAxial)
         {
-            g.NavMoveResultDistBox = dist_box;
-            g.NavMoveResultDistCenter = dist_center;
-            return true;
-        } 
-        if (dist_box == g.NavMoveResultDistBox) 
-        {
-            // Try using distance between center points to break ties
-            if (dist_center < g.NavMoveResultDistCenter) 
-            {
-                g.NavMoveResultDistCenter = dist_center;
-                new_best = true;
-            } 
-            else if (dist_center == g.NavMoveResultDistCenter) 
-            {
-                // Still tied! we need to be extra-careful to make sure everything gets linked properly. We consistently break ties by symbolically moving "later" items 
-                // (with higher index) to the right/downwards by an infinitesimal amount since we the current "best" button already (so it must have a lower index), 
-                // this is fairly easy. This rule ensures that all buttons with dx==dy==0 will end up being linked in order of appearance along the x axis.
-                if (((g.NavMoveDir == ImGuiDir_Up || g.NavMoveDir == ImGuiDir_Down) ? dby : dbx) < 0.0f) // moving bj to the right/down decreases distance
-                    new_best = true;
-            }
+            g.NavMoveResultDistAxial = da;
+            g.NavMoveResultDistCenter = dc;
+            new_best = true;
         }
-    }
+        // There's a tie based on axial distance (items are adjacent), break the
+        // tie based on the distance between each item's center
+        else if (da == g.NavMoveResultDistAxial && dc < g.NavMoveResultDistCenter)
+        {
+            g.NavMoveResultDistCenter = dc;
+            new_best = true;
+        }
 
-    // Axial check: if 'curr' has no link at all in some direction and 'cand' lies roughly in that direction, add a tentative link. This will only be kept if no "real" matches
-    // are found, so it only augments the graph produced by the above method using extra links. (important, since it doesn't guarantee strong connectedness)
-    // This is just to avoid buttons having no links in a particular direction when there's a suitable neighbor. you get good graphs without this too.
-    // 2017/09/29: FIXME: This now currently only enabled inside menubars, ideally we'd disable it everywhere. Menus in particular need to catch failure. For general navigation it feels awkward.
-    // Disabling it may however lead to disconnected graphs when nodes are very spaced out on different axis. Perhaps consider offering this as an option?
-    if (g.NavMoveResultDistBox == FLT_MAX && dist_axial < g.NavMoveResultDistAxial)  // Check axial match
-        if (g.NavLayer == 1 && !(g.NavWindow->Flags & ImGuiWindowFlags_ChildMenu))
-            if ((g.NavMoveDir == ImGuiDir_Left && dax < 0.0f) || (g.NavMoveDir == ImGuiDir_Right && dax > 0.0f) || (g.NavMoveDir == ImGuiDir_Up && day < 0.0f) || (g.NavMoveDir == ImGuiDir_Down && day > 0.0f))
-                g.NavMoveResultDistAxial = dist_axial, new_best = true;
+        // If there is still a tie, ignore it, favoring the earliest item. The
+        // idea being that items are normally added in the order that we'd like
+        // to navigate (left to right and top to bottom) and that order should
+        // be preferred
+    }
 
     return new_best;
 }
@@ -2958,7 +2953,7 @@ static void ImGui::NavUpdate()
     // Reset search 
     g.NavMoveResultId = 0;
     g.NavMoveResultParentId = 0;
-    g.NavMoveResultDistAxial = g.NavMoveResultDistBox = g.NavMoveResultDistCenter = FLT_MAX;
+    g.NavMoveResultDistAxial = g.NavMoveResultDistCenter = FLT_MAX;
 
     // When we have manually scrolled (without using navigation) and NavId becomes out of bounds, we project its bounding box to the visible area to restart navigation within visible items
     if (g.NavMoveRequest && g.NavMoveFromClampedRefRect && g.NavLayer == 0)
@@ -2975,10 +2970,7 @@ static void ImGui::NavUpdate()
         g.NavMoveFromClampedRefRect = false;
     }
 
-    // For scoring we use a single segment on the left side our current item bounding box (not touching the edge to avoid box overlap with zero-spaced items)
     g.NavScoringRectScreen = g.NavWindow ? ImRect(g.NavWindow->Pos + g.NavWindow->NavRectRel[g.NavLayer].Min, g.NavWindow->Pos + g.NavWindow->NavRectRel[g.NavLayer].Max) : ImRect();
-    g.NavScoringRectScreen.Min.x = ImMin(g.NavScoringRectScreen.Min.x + 1.0f, g.NavScoringRectScreen.Max.x);
-    g.NavScoringRectScreen.Max.x = g.NavScoringRectScreen.Min.x;
     //g.OverlayDrawList.AddRect(g.NavScoringRectScreen.Min, g.NavScoringRectScreen.Max, IM_COL32(255,200,0,255)); // [DEBUG]
     //if (g.NavWindow) for (int layer = 0; layer < 2; layer++) g.OverlayDrawList.AddRect(g.NavWindow->Pos + g.NavWindow->NavRectRel[layer].Min, g.NavWindow->Pos + g.NavWindow->NavRectRel[layer].Max, IM_COL32(255,200,0,255)); // [DEBUG]
 }

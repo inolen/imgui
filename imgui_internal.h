@@ -500,9 +500,8 @@ struct ImGuiContext
     ImGuiDir                NavMoveDirLast;                     // Direction of the previous move request
     ImGuiID                 NavMoveResultId;                    // Best move request candidate
     ImGuiID                 NavMoveResultParentId;              //
-    float                   NavMoveResultDistBox;               // Best move request candidate box distance to current NavId
-    float                   NavMoveResultDistCenter;            // Best move request candidate center distance to current NavId
     float                   NavMoveResultDistAxial;
+    float                   NavMoveResultDistCenter;
     ImRect                  NavMoveResultRectRel;               // Best move request candidate bounding box in window relative space
 
     // Storage for SetNexWindow** and SetNextTreeNode*** functions
@@ -617,7 +616,7 @@ struct ImGuiContext
         NavMoveDir = NavMoveDirLast = ImGuiDir_None;
         NavMoveResultId = 0;
         NavMoveResultParentId = 0;
-        NavMoveResultDistBox = NavMoveResultDistCenter = NavMoveResultDistAxial = 0.0f;
+        NavMoveResultDistAxial = NavMoveResultDistCenter = 0.0f;
 
         SetNextWindowPosVal = ImVec2(0.0f, 0.0f);
         SetNextWindowSizeVal = ImVec2(0.0f, 0.0f);
